@@ -633,22 +633,6 @@ def process_certificate(acc_idx, row_idx, row_data, rate_limiter):
             state['completed'] += 1
         step_times['total'] = time.perf_counter() - cert_start
 
-        if perf_enabled and (perf_log_each or step_times['total'] >= perf_slow_threshold):
-            perf_level = 'warning' if step_times['total'] >= perf_slow_threshold else 'info'
-            add_log(
-                (
-                    f'⏱️ Perf {file_name}: copy={step_times.get("copy", 0):.2f}s '
-                    f'replace={step_times.get("replace", 0):.2f}s '
-                    f'export={step_times.get("export", 0):.2f}s '
-                    f'upload={step_times.get("upload", 0):.2f}s '
-                    f'delete={step_times.get("delete", 0):.2f}s '
-                    f'sheet={step_times.get("sheet_update", 0):.2f}s '
-                    f'total={step_times.get("total", 0):.2f}s '
-                    f'[acc={acc_idx}]'
-                ),
-                perf_level
-            )
-        
         add_log(f'✅ [{state["completed"]}/{state["total"]}] {file_name}', 'success')
         broadcast_state()
         
@@ -659,21 +643,6 @@ def process_certificate(acc_idx, row_idx, row_data, rate_limiter):
         with state_lock:
             state['failed'] += 1
         add_log(f'❌ {file_name}: {str(e)[:100]}', 'error')
-        if perf_enabled:
-            add_log(
-                (
-                    f'⏱️ Perf failed {file_name}: copy={step_times.get("copy", 0):.2f}s '
-                    f'replace={step_times.get("replace", 0):.2f}s '
-                    f'export={step_times.get("export", 0):.2f}s '
-                    f'upload={step_times.get("upload", 0):.2f}s '
-                    f'delete={step_times.get("delete", 0):.2f}s '
-                    f'sheet={step_times.get("sheet_update", 0):.2f}s '
-                    f'total={step_times.get("total", 0):.2f}s '
-                    f'[acc={acc_idx}]'
-                ),
-                'warning'
-            )
-        
         if doc_id:
             try:
                 drive.files().delete(fileId=doc_id, supportsAllDrives=True).execute()
