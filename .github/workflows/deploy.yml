@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           PORT="${DEPLOY_PORT:-22}"
-          APP_DIR_VALUE="$HOME/certificate-dashboard"
+          APP_DIR_VALUE="/root/certificate-dashboard"
 
           ssh -o StrictHostKeyChecking=accept-new -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "APP_DIR='$APP_DIR_VALUE' BRANCH='main' bash -s" <<'REMOTE'

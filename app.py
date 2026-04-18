@@ -341,7 +341,9 @@ def load_service_accounts():
         for pattern in sa_patterns:
             sa_files.extend(glob.glob(os.path.join(base_dir, pattern)))
     
-    sa_files = sorted(set(sa_files))
+    # De-duplicate by canonical path to avoid loading the same file twice
+    # when both absolute and relative search dirs point to the same location.
+    sa_files = sorted({os.path.realpath(path) for path in sa_files})
     
     if not sa_files:
         add_log('⚠️ No service account files found!', 'error')

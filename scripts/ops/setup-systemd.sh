@@ -43,6 +43,7 @@ User=$CURRENT_USER
 Group=$CURRENT_USER
 WorkingDirectory=$WORK_DIR
 Environment="PATH=$WORK_DIR/venv/bin"
+Environment="SERVICE_ACCOUNTS_DIR=$WORK_DIR/config/service-accounts"
 
 # Run the application
 ExecStart=$VENV_GUNICORN --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker --workers 1 --bind 127.0.0.1:5000 app:app
