@@ -2,7 +2,9 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/mohamed-alawy-1/certificate-generator.git"
-APP_DIR="${APP_DIR:-$HOME/certificate-dashboard}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_APP_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+APP_DIR="${APP_DIR:-$DEFAULT_APP_DIR}"
 BRANCH="${BRANCH:-main}"
 
 echo "==> Deploying ${BRANCH} to ${APP_DIR}"
@@ -26,9 +28,9 @@ git fetch origin "$BRANCH"
 git checkout "$BRANCH" || git checkout -b "$BRANCH"
 git pull --ff-only origin "$BRANCH"
 
-chmod +x setup-systemd.sh restart-service.sh deploy.sh
+chmod +x scripts/ops/*.sh
 
 echo "==> Applying service setup and restart..."
-./setup-systemd.sh
+APP_DIR="$APP_DIR" ./scripts/ops/setup-systemd.sh
 
 echo "==> Deploy completed"

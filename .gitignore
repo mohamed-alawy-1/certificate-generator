@@ -11,4 +11,5 @@ app.log
 saedny-*.json
 service-account-*.json
 sa-*.json
+config/service-accounts/*.json
 .env

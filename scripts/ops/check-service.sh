@@ -1,15 +1,18 @@
 #!/bin/bash
 # Script to check certificate dashboard service status
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
 echo "═══════════════════════════════════════════════"
 echo "📊 Certificate Dashboard Service Check"
 echo "═══════════════════════════════════════════════"
 echo ""
 
 echo "1️⃣  Process Status:"
-if ps aux | grep -v grep | grep "python.*app.py" > /dev/null; then
+if ps aux | grep -v grep | grep -E "gunicorn.*app:app|python.*app.py" > /dev/null; then
     echo "   ✅ Service is RUNNING"
-    ps aux | grep -v grep | grep "python.*app.py"
+    ps aux | grep -v grep | grep -E "gunicorn.*app:app|python.*app.py"
 else
     echo "   ❌ Service is NOT running"
 fi
@@ -25,8 +28,8 @@ fi
 
 echo ""
 echo "3️⃣  Last 10 Log Lines:"
-if [ -f ~/certificate-dashboard/app.log ]; then
-    tail -10 ~/certificate-dashboard/app.log
+if [ -f "$WORK_DIR/app.log" ]; then
+    tail -10 "$WORK_DIR/app.log"
 else
     echo "   ⚠️  Log file not found"
 fi

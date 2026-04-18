@@ -3,7 +3,8 @@
 
 set -e
 
-WORK_DIR="$HOME/certificate-dashboard"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 VENV_PYTHON="$WORK_DIR/venv/bin/python3"
 VENV_GUNICORN="$WORK_DIR/venv/bin/gunicorn"
 SERVICE_NAME="certificate-dashboard"

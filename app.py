@@ -331,12 +331,19 @@ def broadcast_state():
 def load_service_accounts():
     """Load all service account JSON files"""
     state['accounts'] = []
-    
+
+    # Search both legacy root path and structured config directory.
     sa_patterns = ['saedny-*.json', 'service-account-*.json', 'sa-*.json']
+    search_dirs = ['.', 'config/service-accounts']
+    env_dir = os.environ.get('SERVICE_ACCOUNTS_DIR', '').strip()
+    if env_dir:
+        search_dirs.insert(0, env_dir)
+
     sa_files = []
-    
-    for pattern in sa_patterns:
-        sa_files.extend(glob.glob(pattern))
+
+    for base_dir in search_dirs:
+        for pattern in sa_patterns:
+            sa_files.extend(glob.glob(os.path.join(base_dir, pattern)))
     
     sa_files = sorted(set(sa_files))
     

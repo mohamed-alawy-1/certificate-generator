@@ -1,11 +1,14 @@
 #!/bin/bash
 # Setup systemd service for certificate dashboard
 
+set -e
+
 echo "🔧 Setting up systemd service..."
 
 # Get current user and paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_USER=$(whoami)
-WORK_DIR="$HOME/certificate-dashboard"
+WORK_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 VENV_PYTHON="$WORK_DIR/venv/bin/python3"
 VENV_PIP="$WORK_DIR/venv/bin/pip"
 VENV_GUNICORN="$WORK_DIR/venv/bin/gunicorn"
@@ -20,6 +23,12 @@ fi
 
 echo "📦 Installing/updating dependencies..."
 "$VENV_PIP" install -r "$WORK_DIR/requirements.txt"
+
+if ! command -v logrotate >/dev/null 2>&1; then
+    echo "📦 Installing logrotate..."
+    sudo apt-get update
+    sudo apt-get install -y logrotate
+fi
 
 # Create systemd service file
 echo "📝 Creating systemd service..."

@@ -34,7 +34,7 @@ A comprehensive and integrated system for automatically generating certificates 
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/mohamed-alawy/certificate-generator.git
+git clone https://github.com/mohamed-alawy-1/certificate-generator.git
 cd certificate-generator
 ```
 
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 - Create service accounts from Google Cloud Console
 - Download JSON files and save them in the project folder
 - Name them as: `service-account-1.json`, `service-account-2.json`, etc.
-- See `example-service-account.json` for the required format
+- See `config/examples/example-service-account.json` for the required format
 
 ### 5. Run the Application
 ```bash
@@ -85,7 +85,7 @@ The repository includes automated scripts for production deployment:
 
 #### 1. **Check Service Status**
 ```bash
-./check-service.sh
+./scripts/ops/check-service.sh
 ```
 Displays comprehensive service information:
 - Process status (running/stopped)
@@ -95,13 +95,13 @@ Displays comprehensive service information:
 
 #### 2. **Restart Service**
 ```bash
-./restart-service.sh
+./scripts/ops/restart-service.sh
 ```
 Safely restarts the application service.
 
 #### 3. Setup Systemd Service (Recommended)
 ```bash
-./setup-systemd.sh
+./scripts/ops/setup-systemd.sh
 ```
 Creates a systemd service with:
 - Auto-start on server reboot
@@ -120,7 +120,7 @@ sudo journalctl -u certificate-dashboard -f    # View logs
 
 #### 4. Setup Nginx Reverse Proxy (Security)
 ```bash
-./setup-nginx.sh
+./scripts/ops/setup-nginx.sh
 ```
 Installs and configures Nginx as a reverse proxy:
 - Protection from malicious requests
@@ -135,7 +135,7 @@ After setup, access via: `http://YOUR_SERVER_IP` (port 80)
 
 ```bash
 # 1. Clone and setup
-git clone https://github.com/mohamed-alawy/certificate-generator.git
+git clone https://github.com/mohamed-alawy-1/certificate-generator.git
 cd certificate-generator
 python -m venv venv
 source venv/bin/activate
@@ -144,13 +144,13 @@ pip install -r requirements.txt
 # 2. Add service accounts (*.json files)
 
 # 3. Make scripts executable
-chmod +x *.sh
+chmod +x scripts/ops/*.sh
 
 # 4. Setup systemd service (auto-start & auto-restart)
-./setup-systemd.sh
+./scripts/ops/setup-systemd.sh
 
 # 5. Setup Nginx (security & performance)
-./setup-nginx.sh
+./scripts/ops/setup-nginx.sh
 
 # Done! Service is now production-ready
 ```
@@ -224,18 +224,25 @@ System automatically removes titles and prefixes:
 
 ```
 certificate-generator/
-├── app.py                          # Main Flask + SocketIO server
+├── app.py                                  # Main Flask + SocketIO server
 ├── templates/
-│   └── index.html                  # User interface (SPA)
-├── requirements.txt                # Dependencies
-├── .gitignore                      # Files excluded from Git
-├── example-service-account.json    # Service account example
-├── service-account-*.json          # Service accounts (not in Git)
-├── check-service.sh                # Check service status
-├── restart-service.sh              # Restart service
-├── setup-systemd.sh                # Setup systemd service
-├── setup-nginx.sh                  # Setup Nginx reverse proxy
-└── README.md                       # This file
+│   └── index.html                          # User interface (SPA)
+├── config/
+│   ├── examples/
+│   │   └── example-service-account.json    # Service account example
+│   └── service-accounts/                   # Local service accounts (ignored)
+├── scripts/
+│   ├── check_clean.py                      # Utility check script
+│   └── ops/
+│       ├── deploy.sh                       # CI/CD deploy script
+│       ├── check-service.sh                # Check service status
+│       ├── restart-service.sh              # Restart service
+│       ├── setup-systemd.sh                # Setup systemd service
+│       └── setup-nginx.sh                  # Setup Nginx reverse proxy
+├── requirements.txt                        # Dependencies
+├── .github/workflows/deploy.yml            # GitHub Actions deployment
+├── .gitignore                              # Files excluded from Git
+└── README.md                               # This file
 ```
 
 ## Security and Privacy
@@ -250,10 +257,10 @@ certificate-generator/
 ### Service Accounts Not Working?
 ```bash
 # Verify files are loaded correctly
-ls -la *.json
+ls -la config/service-accounts/*.json
 
 # Check file permissions
-chmod 600 *.json
+chmod 600 config/service-accounts/*.json
 ```
 
 ### Slow Generation?
@@ -267,14 +274,14 @@ chmod 600 *.json
 ### Service Not Working?
 ```bash
 # Quick check with automated script
-./check-service.sh
+./scripts/ops/check-service.sh
 
 # Or manual check
 tail -50 app.log
 ps aux | grep python
 
 # Restart service
-./restart-service.sh
+./scripts/ops/restart-service.sh
 
 # If using systemd
 sudo systemctl restart certificate-dashboard

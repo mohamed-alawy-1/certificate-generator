@@ -55,7 +55,7 @@ jobs:
               export APP_DIR="$HOME/certificate-dashboard"
             fi
 
-            if [ ! -f "$APP_DIR/deploy.sh" ]; then
+            if [ ! -f "$APP_DIR/scripts/ops/deploy.sh" ]; then
               if ! command -v git >/dev/null 2>&1; then
                 sudo apt-get update
                 sudo apt-get install -y git
@@ -65,5 +65,5 @@ jobs:
             fi
 
             cd "$APP_DIR"
-            chmod +x deploy.sh
-            ./deploy.sh
+            chmod +x scripts/ops/*.sh
+            ./scripts/ops/deploy.sh
