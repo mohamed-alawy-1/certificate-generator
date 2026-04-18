@@ -3,7 +3,6 @@
 Certificate Generator Dashboard v2
 - Browse Google Drive folders
 - Select sheets from folder
-- Auto-trigger when new names added
 - Multiple variables support
 """
 
@@ -26,7 +25,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # ============ STATE ============
 state = {
-    'status': 'idle',  # idle, running, paused, completed, watching
+    'status': 'idle',  # idle, running, paused, completed
     'total': 0,
     'completed': 0,
     'failed': 0,
@@ -157,10 +156,8 @@ state = {
 
 # Threading control
 generator_thread = None
-watcher_thread = None
 stop_flag = threading.Event()
 pause_flag = threading.Event()
-watch_stop_flag = threading.Event()
 
 SCOPES = ['https://www.googleapis.com/auth/drive', 
           'https://www.googleapis.com/auth/documents',
@@ -322,7 +319,6 @@ def broadcast_state():
                 'current_name': state['current_name'],
                 'elapsed': time.time() - state['start_time'] if state['start_time'] else 0,
                 'rate': state['completed'] / ((time.time() - state['start_time']) / 60) if state['start_time'] and time.time() > state['start_time'] else 0,
-                'watching': state['config']['auto_watch'],
             }
         socketio.emit('state_update', data, namespace='/')
     except:
@@ -847,7 +843,7 @@ def run_generator(todo=None, is_retry=False):
         broadcast_state()
         
         if not todo:
-            state['status'] = 'watching' if config['auto_watch'] else 'idle'
+            state['status'] = 'idle'
             add_log('✅ No pending certificates.', 'success')
             broadcast_state()
             return
@@ -890,9 +886,9 @@ def run_generator(todo=None, is_retry=False):
             
             # If retry was performed, the status will be set by the retry run
             if not retry_success:
-                state['status'] = 'watching' if config['auto_watch'] else 'completed'
+                state['status'] = 'completed'
         else:
-            state['status'] = 'watching' if config['auto_watch'] else 'completed'
+            state['status'] = 'completed'
             if is_retry:
                 add_log(f'✅ Retry completed. Total completed: {state["completed"]}, Failed: {state["failed"]}', 'success')
         
@@ -902,50 +898,6 @@ def run_generator(todo=None, is_retry=False):
         state['status'] = 'idle'
         add_log(f'💥 Error: {str(e)}', 'error')
         broadcast_state()
-
-# ============ AUTO WATCHER ============
-
-def watcher_loop():
-    """Watch for new entries and auto-generate"""
-    add_log('👁️ Auto-watch started. Checking every {}s...'.format(state['config']['watch_interval']), 'info')
-    
-    while not watch_stop_flag.is_set():
-        if state['status'] not in ['running', 'paused']:
-            # Check for new entries
-            todo = get_pending_rows()
-            
-            if todo:
-                add_log(f'🆕 Found {len(todo)} new entries!', 'info')
-                state['status'] = 'running'
-                run_generator(todo)
-            
-        # Wait for interval
-        for _ in range(state['config']['watch_interval']):
-            if watch_stop_flag.is_set():
-                break
-            time.sleep(1)
-    
-    add_log('👁️ Auto-watch stopped', 'warning')
-
-def start_watcher():
-    global watcher_thread
-    
-    if watcher_thread and watcher_thread.is_alive():
-        return
-    
-    watch_stop_flag.clear()
-    watcher_thread = threading.Thread(target=watcher_loop, daemon=True)
-    watcher_thread.start()
-    state['config']['auto_watch'] = True
-    state['status'] = 'watching'
-    broadcast_state()
-
-def stop_watcher():
-    watch_stop_flag.set()
-    state['config']['auto_watch'] = False
-    if state['status'] == 'watching':
-        state['status'] = 'idle'
-    broadcast_state()
 
 # ============ DRIVE BROWSER ============
 
@@ -1239,7 +1191,9 @@ def save_config():
     state['config']['range_mode'] = data.get('range_mode', 'all')
     state['config']['range_start'] = int(data.get('range_start', 2))
     state['config']['range_end'] = int(data.get('range_end', 1000))
-    state['config']['watch_interval'] = int(data.get('watch_interval', 30))
+    # Auto-watch is deprecated and intentionally disabled.
+    state['config']['auto_watch'] = False
+    state['config']['watch_interval'] = 30
     
     add_log('⚙️ Configuration saved', 'info')
     
@@ -1396,7 +1350,6 @@ def pause_generation():
 def stop_generation():
     stop_flag.set()
     pause_flag.clear()
-    stop_watcher()
     state['status'] = 'idle'
     add_log('⏹️ Stopped', 'warning')
     broadcast_state()
@@ -1404,17 +1357,9 @@ def stop_generation():
 
 @app.route('/api/auto-watch', methods=['POST'])
 def toggle_auto_watch():
-    data = request.json
-    enable = data.get('enable', False)
-    
-    if enable:
-        start_watcher()
-        add_log('👁️ Auto-watch enabled', 'success')
-    else:
-        stop_watcher()
-        add_log('👁️ Auto-watch disabled', 'warning')
-    
-    return jsonify({'success': True, 'watching': state['config']['auto_watch']})
+    state['config']['auto_watch'] = False
+    add_log('ℹ️ Auto-watch is disabled in this version', 'info')
+    return jsonify({'success': False, 'message': 'Auto-watch is disabled', 'watching': False}), 410
 
 @app.route('/api/reload-accounts', methods=['POST'])
 def reload_accounts():
@@ -1433,7 +1378,6 @@ def handle_connect():
         'completed': state['completed'],
         'failed': state['failed'],
         'current_name': state['current_name'],
-        'watching': state['config']['auto_watch'],
     })
 
 # ============ MAIN ============
