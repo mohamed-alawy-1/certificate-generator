@@ -1133,13 +1133,18 @@ def get_state():
 @app.route('/api/config', methods=['POST'])
 def save_config():
     data = request.json
+
+    prev_template_id = state['config'].get('template_doc_id', '')
+    prev_sheet_id = state['config'].get('sheet_id', '')
     
     # Template - now receives ID directly
     state['config']['template_doc_id'] = data.get('template_doc_id', '')
     state['config']['template_doc_name'] = data.get('template_doc_name', '')
+
+    template_changed = state['config']['template_doc_id'] != prev_template_id
     
     # Auto-detect template type from Drive API
-    if state['config']['template_doc_id']:
+    if state['config']['template_doc_id'] and (template_changed or not state['config'].get('template_type')):
         try:
             drive, _, _, _ = get_services(0)
             file_info = drive.files().get(
@@ -1175,14 +1180,17 @@ def save_config():
     # Sheet
     state['config']['sheet_id'] = data.get('sheet_id', '')
     state['config']['sheet_name'] = data.get('sheet_name', '')
+
+    sheet_changed = state['config']['sheet_id'] != prev_sheet_id
     
     # Load columns if sheet changed
     if state['config']['sheet_id']:
-        state['columns'] = get_sheet_columns(state['config']['sheet_id'])
-        # Auto-detect or create link column
-        state['config']['link_column'] = find_or_create_link_column(state['config']['sheet_id'])
-        # Auto-detect name column
-        state['config']['name_column'] = auto_detect_name_column(state['columns'])
+        if sheet_changed or not state.get('columns'):
+            state['columns'] = get_sheet_columns(state['config']['sheet_id'])
+            # Auto-detect or create link column
+            state['config']['link_column'] = find_or_create_link_column(state['config']['sheet_id'])
+            # Auto-detect name column
+            state['config']['name_column'] = auto_detect_name_column(state['columns'])
     else:
         state['columns'] = []
         state['config']['link_column'] = 'O'
@@ -1199,19 +1207,22 @@ def save_config():
     
     # Auto-detect single variable from template
     if state['config']['template_doc_id']:
-        template_type = state['config'].get('template_type', 'doc')
-        detected = detect_template_variables(state['config']['template_doc_id'], template_type)
-        if detected:
-            # Use first detected variable as the name variable
-            first_var = detected[0]
-            name_col = state['config'].get('name_column', '')
-            state['variables'] = [{
-                'placeholder': first_var,
-                'source': 'column',
-                'column': name_col if name_col else 'A',
-                'description': 'الاسم'
-            }]
-            add_log(f'🔍 Detected variable: {first_var} → Column {name_col or "A"}', 'info')
+        if template_changed or not state.get('variables'):
+            template_type = state['config'].get('template_type', 'doc')
+            detected = detect_template_variables(state['config']['template_doc_id'], template_type)
+            if detected:
+                # Use first detected variable as the name variable
+                first_var = detected[0]
+                name_col = state['config'].get('name_column', '')
+                state['variables'] = [{
+                    'placeholder': first_var,
+                    'source': 'column',
+                    'column': name_col if name_col else 'A',
+                    'description': 'الاسم'
+                }]
+                add_log(f'🔍 Detected variable: {first_var} → Column {name_col or "A"}', 'info')
+    else:
+        state['variables'] = []
     
     return jsonify({'success': True, 'config': state['config'], 'variables': state['variables'], 'columns': state['columns']})
 

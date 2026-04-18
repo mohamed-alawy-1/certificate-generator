@@ -5,7 +5,8 @@ let currentBrowserTarget = null;
 let currentBrowserType = null;
 let currentFolderId = 'root';
 let folderHistory = [{ id: 'root', name: 'الملفات المشتركة' }];
-const CONFIG_SAVE_TIMEOUT_MS = 60000;
+const CONFIG_SAVE_TIMEOUT_MS = 180000;
+const CONFIG_SAVE_SLOW_NOTICE_MS = 25000;
 
 document.addEventListener('DOMContentLoaded', () => {
     bindModalShortcuts();
@@ -486,6 +487,7 @@ async function saveConfig() {
     const saveButtonText = saveButton ? saveButton.querySelector('span') : null;
     const originalButtonLabel = saveButtonText ? saveButtonText.textContent : '';
     let timeoutId = null;
+    let slowNoticeId = null;
 
     try {
         if (saveButton) {
@@ -518,10 +520,13 @@ async function saveConfig() {
             return;
         }
 
-        showToast('جاري التحقق من القالب وقراءة إعدادات الشيت من Google...', 'info');
+        showToast('جاري حفظ الإعدادات والتحقق من Google... قد يستغرق ذلك قليلا', 'info');
 
         const controller = new AbortController();
         timeoutId = setTimeout(() => controller.abort(), CONFIG_SAVE_TIMEOUT_MS);
+        slowNoticeId = setTimeout(() => {
+            showToast('ما زال الحفظ جاريا... انتظر حتى اكتمال التحقق من القالب والشيت', 'info');
+        }, CONFIG_SAVE_SLOW_NOTICE_MS);
 
         const res = await fetch('/api/config', {
             method: 'POST',
@@ -551,13 +556,16 @@ async function saveConfig() {
         showToast('تم حفظ الإعدادات بنجاح', 'success');
     } catch (error) {
         if (error.name === 'AbortError') {
-            showToast('استغرق الحفظ وقتا طويلا أثناء التواصل مع Google. حاول مرة أخرى.', 'warning');
+            showToast('استغرق الحفظ أكثر من المتوقع (3 دقائق) أثناء التواصل مع Google. حاول مرة أخرى.', 'warning');
             return;
         }
         showToast('تعذر الاتصال بالخادم', 'error');
     } finally {
         if (timeoutId) {
             clearTimeout(timeoutId);
+        }
+        if (slowNoticeId) {
+            clearTimeout(slowNoticeId);
         }
         if (saveButton) {
             saveButton.disabled = false;
