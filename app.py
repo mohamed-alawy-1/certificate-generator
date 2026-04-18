@@ -993,6 +993,28 @@ def get_sheet_columns(sheet_id):
         add_log(f'⚠️ Could not read sheet headers: {str(e)[:100]}', 'warning')
         return []
 
+def detect_single_variable_in_background(template_id, template_type, name_col):
+    """Detect first template variable asynchronously to keep /api/config fast."""
+    detected = detect_template_variables(template_id, template_type)
+    if not detected:
+        return
+
+    with state_lock:
+        # Ignore stale result if user changed template while detection was running.
+        if state['config'].get('template_doc_id') != template_id:
+            return
+
+        first_var = detected[0]
+        state['variables'] = [{
+            'placeholder': first_var,
+            'source': 'column',
+            'column': name_col if name_col else 'A',
+            'description': 'الاسم'
+        }]
+
+    add_log(f'🔍 Detected variable: {first_var} → Column {name_col or "A"}', 'info')
+    broadcast_state()
+
 def auto_detect_name_column(columns):
     """Auto-detect column with name based on header"""
     if not columns:
@@ -1015,63 +1037,63 @@ def auto_detect_name_column(columns):
     
     return 'A'
 
-def find_or_create_link_column(sheet_id):
-    """Find 'رابط الشهادة' column or create it as last column"""
+def find_or_create_link_column(sheet_id, columns=None):
+    """Find 'رابط الشهادة' column or create it as next header column."""
     try:
+        started_at = time.time()
         _, _, _, sheets = get_services(0)
-        
-        # Get all rows to find actual last column with data
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range='1:100'  # Check first 100 rows
-        ).execute()
-        
-        rows = result.get('values', [])
-        if not rows:
-            # Empty sheet - start at column A
-            sheets.spreadsheets().values().update(
+
+        # Reuse already-loaded header row when available to avoid an extra read.
+        if columns is None:
+            result = sheets.spreadsheets().values().get(
                 spreadsheetId=sheet_id,
-                range='A1',
-                valueInputOption='RAW',
-                body={'values': [['رابط الشهادة']]}
+                range='1:1'
             ).execute()
-            add_log('🔗 Created link column "رابط الشهادة" at A', 'success')
-            return 'A'
-        
-        headers = rows[0] if rows else []
+            headers = result.get('values', [[]])[0]
+            header_columns = []
+            for idx, header in enumerate(headers):
+                col_letter = ''
+                n = idx
+                while n >= 0:
+                    col_letter = chr(n % 26 + ord('A')) + col_letter
+                    n = n // 26 - 1
+                header_columns.append({
+                    'letter': col_letter,
+                    'name': header.strip() if header else '',
+                    'index': idx
+                })
+        else:
+            header_columns = columns
+            headers = [c.get('name', '') for c in columns]
         
         # Search for existing "رابط الشهادة" column
         link_column_names = ['رابط الشهادة', 'رابط الشهاده', 'Certificate Link', 'certificate_link', 'Link']
-        for idx, header in enumerate(headers):
+        for col in header_columns:
+            idx = col.get('index', 0)
+            header = col.get('name', '')
             header_clean = header.strip().lower() if header else ''
             for name in link_column_names:
                 if name.lower() in header_clean or header_clean in name.lower():
-                    # Found! Calculate column letter
-                    col_letter = ''
-                    n = idx
-                    while n >= 0:
-                        col_letter = chr(n % 26 + ord('A')) + col_letter
-                        n = n // 26 - 1
+                    col_letter = col.get('letter')
+                    if not col_letter:
+                        col_letter = ''
+                        n = idx
+                        while n >= 0:
+                            col_letter = chr(n % 26 + ord('A')) + col_letter
+                            n = n // 26 - 1
                     add_log(f'🔗 Found link column "{header}" at {col_letter}', 'info')
+                    elapsed = time.time() - started_at
+                    add_log(f'⏱️ Link column check completed in {elapsed:.2f}s', 'info')
                     return col_letter
-        
-        # Not found - find the last non-empty column across all rows
-        max_col = 0
-        for row in rows:
-            # Find last non-empty cell in this row
-            for i in range(len(row) - 1, -1, -1):
-                if row[i] and str(row[i]).strip():
-                    max_col = max(max_col, i)
-                    break
-        
-        # Add column after last used column
-        next_col_idx = max_col + 1
+
+        # Not found - append after current header width.
+        next_col_idx = len(headers)
         col_letter = ''
         n = next_col_idx
         while n >= 0:
             col_letter = chr(n % 26 + ord('A')) + col_letter
             n = n // 26 - 1
-        
+
         # Write header with name "رابط الشهادة"
         sheets.spreadsheets().values().update(
             spreadsheetId=sheet_id,
@@ -1079,8 +1101,10 @@ def find_or_create_link_column(sheet_id):
             valueInputOption='RAW',
             body={'values': [['رابط الشهادة']]}
         ).execute()
-        
+
         add_log(f'🔗 Created link column "رابط الشهادة" at {col_letter}', 'success')
+        elapsed = time.time() - started_at
+        add_log(f'⏱️ Link column check completed in {elapsed:.2f}s', 'info')
         return col_letter
         
     except Exception as e:
@@ -1145,17 +1169,20 @@ def save_config():
 
     template_changed = state['config']['template_doc_id'] != prev_template_id
     
-    # Auto-detect template type from Drive API
-    if state['config']['template_doc_id'] and (template_changed or not state['config'].get('template_type')):
+    # Prefer template_type from frontend selection to avoid extra Drive request.
+    template_type_input = (data.get('template_type') or '').strip().lower()
+    if template_type_input in ('doc', 'slide'):
+        state['config']['template_type'] = template_type_input
+    elif state['config']['template_doc_id'] and (template_changed or not state['config'].get('template_type')):
         try:
             drive, _, _, _ = get_services(0)
             file_info = drive.files().get(
-                fileId=state['config']['template_doc_id'], 
+                fileId=state['config']['template_doc_id'],
                 fields='mimeType',
                 supportsAllDrives=True
             ).execute()
             mime_type = file_info.get('mimeType', '')
-            
+
             if 'presentation' in mime_type:
                 state['config']['template_type'] = 'slide'
                 add_log('📊 Detected template type: Google Slides', 'info')
@@ -1163,13 +1190,13 @@ def save_config():
                 state['config']['template_type'] = 'doc'
                 add_log('📄 Detected template type: Google Docs', 'info')
             else:
-                state['config']['template_type'] = 'doc'  # Default
+                state['config']['template_type'] = 'doc'
                 add_log(f'⚠️ Unknown template type: {mime_type}, defaulting to Docs', 'warning')
         except Exception as e:
-            state['config']['template_type'] = 'doc'  # Default on error
+            state['config']['template_type'] = 'doc'
             add_log(f'⚠️ Could not detect template type: {str(e)[:50]}', 'warning')
     else:
-        state['config']['template_type'] = 'doc'
+        state['config']['template_type'] = state['config'].get('template_type', 'doc') or 'doc'
     
     # Target folder
     state['config']['target_folder_id'] = data.get('target_folder_id', '')
@@ -1190,7 +1217,7 @@ def save_config():
         if sheet_changed or not state.get('columns'):
             state['columns'] = get_sheet_columns(state['config']['sheet_id'])
             # Auto-detect or create link column
-            state['config']['link_column'] = find_or_create_link_column(state['config']['sheet_id'])
+            state['config']['link_column'] = find_or_create_link_column(state['config']['sheet_id'], state['columns'])
             # Auto-detect name column
             state['config']['name_column'] = auto_detect_name_column(state['columns'])
     else:
@@ -1206,23 +1233,18 @@ def save_config():
     state['config']['watch_interval'] = 30
     
     add_log('⚙️ Configuration saved', 'info')
-    
-    # Auto-detect single variable from template
+
+    # Detect first variable in background so save responds quickly.
     if state['config']['template_doc_id']:
         if template_changed or not state.get('variables'):
             template_type = state['config'].get('template_type', 'doc')
-            detected = detect_template_variables(state['config']['template_doc_id'], template_type)
-            if detected:
-                # Use first detected variable as the name variable
-                first_var = detected[0]
-                name_col = state['config'].get('name_column', '')
-                state['variables'] = [{
-                    'placeholder': first_var,
-                    'source': 'column',
-                    'column': name_col if name_col else 'A',
-                    'description': 'الاسم'
-                }]
-                add_log(f'🔍 Detected variable: {first_var} → Column {name_col or "A"}', 'info')
+            name_col = state['config'].get('name_column', '')
+            add_log('⏳ Detecting template variables in background...', 'info')
+            threading.Thread(
+                target=detect_single_variable_in_background,
+                args=(state['config']['template_doc_id'], template_type, name_col),
+                daemon=True
+            ).start()
     else:
         state['variables'] = []
     
@@ -1289,7 +1311,11 @@ def api_detect_variables():
     if not template_id:
         return jsonify({'error': 'No template configured'}), 400
     
-    detected = detect_template_variables(template_id)
+    template_type = (data.get('template_type') or state['config'].get('template_type') or 'doc').strip().lower()
+    if template_type not in ('doc', 'slide'):
+        template_type = 'doc'
+
+    detected = detect_template_variables(template_id, template_type)
     if detected:
         # Update variables
         existing_placeholders = {v['placeholder']: v for v in state['variables']}

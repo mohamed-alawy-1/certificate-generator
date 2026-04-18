@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v=20260418-2">
 </head>
 <body>
     <div class="container">
@@ -108,6 +108,7 @@
                         <div class="form-group">
                             <label>ملف القالب</label>
                             <input type="hidden" id="templateUrl">
+                            <input type="hidden" id="templateType" value="doc">
                             <div id="templateSelected" class="selected-file is-hidden">
                                 <i class="bi bi-file-earmark-richtext file-icon" aria-hidden="true"></i>
                                 <span class="file-tag">مستند</span>
@@ -358,6 +359,6 @@ Madam</textarea>
 
     <div class="toast-stack" id="toastStack"></div>
 
-    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=20260418-4"></script>
 </body>
 </html>

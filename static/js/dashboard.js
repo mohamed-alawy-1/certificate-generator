@@ -5,8 +5,12 @@ let currentBrowserTarget = null;
 let currentBrowserType = null;
 let currentFolderId = 'root';
 let folderHistory = [{ id: 'root', name: 'الملفات المشتركة' }];
-const CONFIG_SAVE_TIMEOUT_MS = 180000;
+let isSavingConfig = false;
 const CONFIG_SAVE_SLOW_NOTICE_MS = 25000;
+const CONFIG_SAVE_REQUEST_TIMEOUT_MS = 90000;
+const CONFIG_SAVE_EARLY_CONFIRM_TIMEOUT_MS = 45000;
+const CONFIG_SAVE_CONFIRM_TIMEOUT_MS = 120000;
+const CONFIG_SAVE_CONFIRM_INTERVAL_MS = 3000;
 
 document.addEventListener('DOMContentLoaded', () => {
     bindModalShortcuts();
@@ -289,6 +293,9 @@ function selectFile(file) {
     const fileMeta = fileTypeMeta(file);
 
     if (target === 'template') {
+        const mimeType = (file && file.mimeType) ? file.mimeType : '';
+        const templateType = mimeType.includes('presentation') ? 'slide' : 'doc';
+        document.getElementById('templateType').value = templateType;
         showSelection('template', file, fileMeta.tag, fileMeta.icon);
     } else if (target === 'targetFolder') {
         showSelection('targetFolder', file, 'مجلد', 'bi-folder2');
@@ -306,6 +313,10 @@ function clearSelection(target) {
     selected.classList.add('is-hidden');
     document.getElementById(target + 'Name').textContent = '';
 
+    if (target === 'template') {
+        document.getElementById('templateType').value = 'doc';
+    }
+
     if (target === 'sheet') {
         sheetColumns = [];
     }
@@ -320,6 +331,7 @@ async function loadState() {
 
         if (data.config) {
             document.getElementById('templateUrl').value = data.config.template_doc_id || '';
+            document.getElementById('templateType').value = data.config.template_type || 'doc';
             document.getElementById('targetFolderUrl').value = data.config.target_folder_id || '';
             document.getElementById('tempFolderUrl').value = data.config.temp_folder_id || '';
             document.getElementById('sheetUrl').value = data.config.sheet_id || '';
@@ -482,14 +494,100 @@ async function parseJsonSafe(response) {
     }
 }
 
+function waitMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function applyConfigSaveResult(data) {
+    if (data.columns && data.columns.length > 0) {
+        sheetColumns = data.columns;
+    }
+
+    if (data.config && data.config.link_column) {
+        document.getElementById('linkColumn').value = data.config.link_column;
+    }
+
+    if (data.config && data.config.name_column) {
+        document.getElementById('nameColumn').value = data.config.name_column;
+    }
+}
+
+function isSameSavedConfig(serverConfig, requestedConfig) {
+    if (!serverConfig || !requestedConfig) {
+        return false;
+    }
+
+    return (
+        (serverConfig.template_doc_id || '') === (requestedConfig.template_doc_id || '') &&
+        (serverConfig.target_folder_id || '') === (requestedConfig.target_folder_id || '') &&
+        (serverConfig.sheet_id || '') === (requestedConfig.sheet_id || '') &&
+        (serverConfig.range_mode || 'all') === (requestedConfig.range_mode || 'all') &&
+        parseInt(serverConfig.range_start || 2, 10) === parseInt(requestedConfig.range_start || 2, 10) &&
+        parseInt(serverConfig.range_end || 1000, 10) === parseInt(requestedConfig.range_end || 1000, 10)
+    );
+}
+
+async function confirmConfigSaved(requestedConfig, timeoutMs = CONFIG_SAVE_CONFIRM_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() <= deadline) {
+        try {
+            const stateRes = await fetch('/api/state', { cache: 'no-store' });
+            if (stateRes.ok) {
+                const stateData = await parseJsonSafe(stateRes);
+                const serverConfig = stateData.config || {};
+                if (isSameSavedConfig(serverConfig, requestedConfig)) {
+                    return { saved: true, stateData };
+                }
+            }
+        } catch (error) {
+            // Ignore transient connectivity issues during confirmation polling.
+        }
+
+        await waitMs(CONFIG_SAVE_CONFIRM_INTERVAL_MS);
+    }
+
+    return { saved: false, stateData: null };
+}
+
+async function requestConfigSave(config, controller) {
+    try {
+        const res = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+            signal: controller.signal
+        });
+
+        const data = await parseJsonSafe(res);
+        return {
+            kind: 'fetch',
+            ok: res.ok,
+            status: res.status,
+            data
+        };
+    } catch (error) {
+        return {
+            kind: 'fetch_error',
+            error
+        };
+    }
+}
+
 async function saveConfig() {
     const saveButton = document.getElementById('saveConfigBtn');
     const saveButtonText = saveButton ? saveButton.querySelector('span') : null;
     const originalButtonLabel = saveButtonText ? saveButtonText.textContent : '';
-    let timeoutId = null;
     let slowNoticeId = null;
+    let requestTimeoutId = null;
 
     try {
+        if (isSavingConfig) {
+            showToast('يوجد حفظ قيد التنفيذ بالفعل', 'info');
+            return;
+        }
+        isSavingConfig = true;
+
         if (saveButton) {
             saveButton.disabled = true;
         }
@@ -506,6 +604,7 @@ async function saveConfig() {
         const config = {
             template_doc_id: document.getElementById('templateUrl').value,
             template_doc_name: document.getElementById('templateName').textContent || '',
+            template_type: document.getElementById('templateType').value || 'doc',
             target_folder_id: document.getElementById('targetFolderUrl').value,
             target_folder_name: document.getElementById('targetFolderName').textContent || '',
             sheet_id: document.getElementById('sheetUrl').value,
@@ -522,51 +621,82 @@ async function saveConfig() {
 
         showToast('جاري حفظ الإعدادات والتحقق من Google... قد يستغرق ذلك قليلا', 'info');
 
-        const controller = new AbortController();
-        timeoutId = setTimeout(() => controller.abort(), CONFIG_SAVE_TIMEOUT_MS);
         slowNoticeId = setTimeout(() => {
             showToast('ما زال الحفظ جاريا... انتظر حتى اكتمال التحقق من القالب والشيت', 'info');
         }, CONFIG_SAVE_SLOW_NOTICE_MS);
 
-        const res = await fetch('/api/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config),
-            signal: controller.signal
-        });
+        const controller = new AbortController();
+        requestTimeoutId = setTimeout(() => controller.abort(), CONFIG_SAVE_REQUEST_TIMEOUT_MS);
 
-        const data = await parseJsonSafe(res);
-        if (!res.ok) {
+        const fetchOutcomePromise = requestConfigSave(config, controller);
+        const earlyConfirmPromise = confirmConfigSaved(config, CONFIG_SAVE_EARLY_CONFIRM_TIMEOUT_MS)
+            .then((result) => ({ kind: 'confirm', result }));
+
+        let firstOutcome = await Promise.race([fetchOutcomePromise, earlyConfirmPromise]);
+
+        if (firstOutcome.kind === 'confirm' && firstOutcome.result.saved) {
+            if (!controller.signal.aborted) {
+                controller.abort();
+            }
+            applyConfigSaveResult({
+                config: firstOutcome.result.stateData?.config || {},
+                columns: firstOutcome.result.stateData?.columns || []
+            });
+            showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+            return;
+        }
+
+        if (firstOutcome.kind === 'confirm' && !firstOutcome.result.saved) {
+            firstOutcome = await fetchOutcomePromise;
+        }
+
+        if (firstOutcome.kind === 'fetch_error') {
+            if (firstOutcome.error && firstOutcome.error.name === 'AbortError') {
+                showToast('تأخر رد الخادم. جار التحقق من حالة الحفظ...', 'warning');
+                const confirmed = await confirmConfigSaved(config);
+                if (confirmed.saved) {
+                    applyConfigSaveResult({
+                        config: confirmed.stateData?.config || {},
+                        columns: confirmed.stateData?.columns || []
+                    });
+                    showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+                    return;
+                }
+                showToast('تعذر تأكيد الحفظ بعد انتهاء المهلة. حاول مرة أخرى.', 'error');
+                return;
+            }
+
+            throw firstOutcome.error;
+        }
+
+        const data = firstOutcome.data || {};
+        if (!firstOutcome.ok) {
+            const confirmed = await confirmConfigSaved(config, 20000);
+            if (confirmed.saved) {
+                applyConfigSaveResult({
+                    config: confirmed.stateData?.config || {},
+                    columns: confirmed.stateData?.columns || []
+                });
+                showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+                return;
+            }
             showToast(data.error || 'تعذر حفظ الإعدادات', 'error');
             return;
         }
 
-        if (data.columns && data.columns.length > 0) {
-            sheetColumns = data.columns;
-        }
-
-        if (data.config && data.config.link_column) {
-            document.getElementById('linkColumn').value = data.config.link_column;
-        }
-
-        if (data.config && data.config.name_column) {
-            document.getElementById('nameColumn').value = data.config.name_column;
-        }
+        applyConfigSaveResult(data);
 
         showToast('تم حفظ الإعدادات بنجاح', 'success');
     } catch (error) {
-        if (error.name === 'AbortError') {
-            showToast('استغرق الحفظ أكثر من المتوقع (3 دقائق) أثناء التواصل مع Google. حاول مرة أخرى.', 'warning');
-            return;
-        }
         showToast('تعذر الاتصال بالخادم', 'error');
     } finally {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-        }
         if (slowNoticeId) {
             clearTimeout(slowNoticeId);
         }
+        if (requestTimeoutId) {
+            clearTimeout(requestTimeoutId);
+        }
+        isSavingConfig = false;
         if (saveButton) {
             saveButton.disabled = false;
         }
