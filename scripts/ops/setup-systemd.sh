@@ -89,15 +89,33 @@ echo "🚀 Enabling and starting service..."
 sudo systemctl enable certificate-dashboard.service
 sudo systemctl start certificate-dashboard.service
 
-# Wait a moment
-sleep 3
+# Wait until service stabilizes (avoids transient auto-restart race in CI)
+echo "⏳ Waiting for service to stabilize..."
+for _ in $(seq 1 15); do
+    STATE="$(sudo systemctl is-active certificate-dashboard.service || true)"
+    if [ "$STATE" = "active" ]; then
+        break
+    fi
+    sleep 2
+done
 
 # Check status
 echo ""
 echo "═══════════════════════════════════════════════"
 echo "📊 Service Status:"
 echo "═══════════════════════════════════════════════"
-sudo systemctl status certificate-dashboard.service --no-pager
+
+FINAL_STATE="$(sudo systemctl is-active certificate-dashboard.service || true)"
+if [ "$FINAL_STATE" != "active" ]; then
+    echo "❌ Service is not active (state: $FINAL_STATE)"
+    sudo systemctl status certificate-dashboard.service --no-pager || true
+    echo ""
+    echo "🧾 Last logs:"
+    sudo journalctl -u certificate-dashboard.service -n 80 --no-pager || true
+    exit 1
+fi
+
+sudo systemctl status certificate-dashboard.service --no-pager || true
 
 echo ""
 echo "═══════════════════════════════════════════════"
