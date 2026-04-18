@@ -5,12 +5,17 @@ let currentBrowserTarget = null;
 let currentBrowserType = null;
 let currentFolderId = 'root';
 let folderHistory = [{ id: 'root', name: 'الملفات المشتركة' }];
+let currentBrowserFiles = [];
+let currentBrowserQuery = '';
 let isSavingConfig = false;
+let isStoppingGeneration = false;
+let pendingSaveLogResolver = null;
 const CONFIG_SAVE_SLOW_NOTICE_MS = 25000;
-const CONFIG_SAVE_REQUEST_TIMEOUT_MS = 90000;
+const CONFIG_SAVE_REQUEST_TIMEOUT_MS = 5000;
 const CONFIG_SAVE_EARLY_CONFIRM_TIMEOUT_MS = 45000;
 const CONFIG_SAVE_CONFIRM_TIMEOUT_MS = 120000;
 const CONFIG_SAVE_CONFIRM_INTERVAL_MS = 3000;
+const CONFIG_STATE_POLL_TIMEOUT_MS = 4000;
 
 document.addEventListener('DOMContentLoaded', () => {
     bindModalShortcuts();
@@ -19,7 +24,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
 socket.on('connect', () => console.log('Socket connected'));
 socket.on('state_update', (data) => updateUI(data));
-socket.on('log', (log) => addLog(log));
+socket.on('log', (log) => {
+    addLog(log);
+
+    if (isSavingConfig && pendingSaveLogResolver && isConfigSavedLog(log)) {
+        pendingSaveLogResolver({ kind: 'log_saved' });
+        pendingSaveLogResolver = null;
+    }
+});
 
 function showTab(tabId, tabButton) {
     document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
@@ -42,19 +54,43 @@ function toggleRangeMode() {
 }
 
 function bindModalShortcuts() {
-    const modal = document.getElementById('fileBrowserModal');
+    const browserModal = document.getElementById('fileBrowserModal');
+    const stopModal = document.getElementById('stopConfirmModal');
 
-    modal.addEventListener('click', (event) => {
+    browserModal.addEventListener('click', (event) => {
         if (event.target.id === 'fileBrowserModal') {
             closeBrowser();
         }
     });
 
+    stopModal.addEventListener('click', (event) => {
+        if (event.target.id === 'stopConfirmModal') {
+            closeStopConfirmModal();
+        }
+    });
+
     document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && modal.classList.contains('active')) {
+        if (event.key !== 'Escape') {
+            return;
+        }
+
+        if (stopModal.classList.contains('active')) {
+            closeStopConfirmModal();
+            return;
+        }
+
+        if (browserModal.classList.contains('active')) {
             closeBrowser();
         }
     });
+}
+
+function openStopConfirmModal() {
+    document.getElementById('stopConfirmModal').classList.add('active');
+}
+
+function closeStopConfirmModal() {
+    document.getElementById('stopConfirmModal').classList.remove('active');
 }
 
 function showToast(message, type = 'info') {
@@ -67,6 +103,11 @@ function showToast(message, type = 'info') {
     setTimeout(() => {
         toast.remove();
     }, 3200);
+}
+
+function isConfigSavedLog(log) {
+    const message = String(log && log.message ? log.message : '');
+    return message.includes('Configuration saved') || message.includes('تم حفظ الإعدادات');
 }
 
 async function reloadAccounts() {
@@ -107,6 +148,8 @@ function openBrowser(target, type) {
     currentBrowserType = type;
     currentFolderId = 'root';
     folderHistory = [{ id: 'root', name: 'الملفات المشتركة' }];
+    currentBrowserFiles = [];
+    currentBrowserQuery = '';
 
     const titles = {
         doc: 'اختيار ملف القالب',
@@ -116,6 +159,16 @@ function openBrowser(target, type) {
 
     document.getElementById('browserTitle').textContent = titles[type] || 'تصفح الملفات';
     document.getElementById('fileBrowserModal').classList.add('active');
+
+    const searchInput = document.getElementById('browserSearchInput');
+    const searchCount = document.getElementById('browserSearchCount');
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.focus();
+    }
+    if (searchCount) {
+        searchCount.textContent = '';
+    }
 
     updateBreadcrumb();
     loadFiles('root');
@@ -145,6 +198,216 @@ function navigateTo(folderId, index) {
     currentFolderId = folderId;
     updateBreadcrumb();
     loadFiles(folderId);
+}
+
+function normalizeArabicText(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/[\u064B-\u065F\u0670]/g, '')
+        .replace(/[\u0610-\u061A]/g, '')
+        .replace(/[أإآٱ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي')
+        .replace(/[ؤئ]/g, 'ء')
+        .replace(/ـ/g, '')
+        .replace(/[\u200c\u200d]/g, '')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function splitTokens(text) {
+    const normalized = normalizeArabicText(text);
+    return normalized ? normalized.split(' ').filter(Boolean) : [];
+}
+
+function isSubsequence(needle, haystack) {
+    if (!needle) {
+        return true;
+    }
+    let i = 0;
+    let j = 0;
+    while (i < needle.length && j < haystack.length) {
+        if (needle[i] === haystack[j]) {
+            i += 1;
+        }
+        j += 1;
+    }
+    return i === needle.length;
+}
+
+function levenshteinDistanceWithLimit(a, b, limit) {
+    if (Math.abs(a.length - b.length) > limit) {
+        return limit + 1;
+    }
+
+    const prev = new Array(b.length + 1);
+    const curr = new Array(b.length + 1);
+
+    for (let j = 0; j <= b.length; j += 1) {
+        prev[j] = j;
+    }
+
+    for (let i = 1; i <= a.length; i += 1) {
+        curr[0] = i;
+        let rowMin = curr[0];
+
+        for (let j = 1; j <= b.length; j += 1) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            curr[j] = Math.min(
+                prev[j] + 1,
+                curr[j - 1] + 1,
+                prev[j - 1] + cost
+            );
+            if (curr[j] < rowMin) {
+                rowMin = curr[j];
+            }
+        }
+
+        if (rowMin > limit) {
+            return limit + 1;
+        }
+
+        for (let j = 0; j <= b.length; j += 1) {
+            prev[j] = curr[j];
+        }
+    }
+
+    return prev[b.length];
+}
+
+function fuzzyTokenMatch(queryToken, candidateText, candidateTokens) {
+    if (!queryToken) {
+        return true;
+    }
+
+    if (candidateText.includes(queryToken)) {
+        return true;
+    }
+
+    if (isSubsequence(queryToken, candidateText)) {
+        return true;
+    }
+
+    const limit = queryToken.length <= 4 ? 1 : 2;
+    for (const token of candidateTokens) {
+        if (!token) {
+            continue;
+        }
+        if (token.includes(queryToken) || queryToken.includes(token)) {
+            return true;
+        }
+        if (isSubsequence(queryToken, token)) {
+            return true;
+        }
+        if (levenshteinDistanceWithLimit(queryToken, token, limit) <= limit) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function filterBrowserFiles(files, query) {
+    const queryTokens = splitTokens(query);
+    if (!queryTokens.length) {
+        return files;
+    }
+
+    return files.filter((file) => {
+        const meta = fileTypeMeta(file);
+        const candidateText = normalizeArabicText(`${file.name} ${meta.label} ${meta.tag}`);
+        const candidateTokens = candidateText ? candidateText.split(' ') : [];
+
+        return queryTokens.every((token) => fuzzyTokenMatch(token, candidateText, candidateTokens));
+    });
+}
+
+function updateBrowserSearchCount(total, filtered) {
+    const searchCount = document.getElementById('browserSearchCount');
+    if (!searchCount) {
+        return;
+    }
+
+    if (!currentBrowserQuery.trim()) {
+        searchCount.textContent = `عدد العناصر: ${total}`;
+        return;
+    }
+
+    searchCount.textContent = `نتائج البحث: ${filtered} من ${total}`;
+}
+
+function renderBrowserFiles(files) {
+    const fileList = document.getElementById('fileList');
+    fileList.innerHTML = '';
+
+    const filteredFiles = filterBrowserFiles(files, currentBrowserQuery);
+    updateBrowserSearchCount(files.length, filteredFiles.length);
+
+    if (!filteredFiles.length) {
+        const empty = document.createElement('li');
+        empty.className = 'empty';
+        empty.textContent = currentBrowserQuery
+            ? 'لا توجد نتائج مطابقة. جرّب كتابة مختلفة أو أقصر.'
+            : 'لا توجد ملفات في هذا المسار';
+        fileList.appendChild(empty);
+        return;
+    }
+
+    filteredFiles.forEach((file) => {
+        const item = document.createElement('li');
+        item.className = 'file-item' + (file.isFolder ? ' folder' : '');
+
+        const fileMeta = fileTypeMeta(file);
+
+        const icon = document.createElement('i');
+        icon.className = 'bi ' + fileMeta.icon + ' file-icon';
+        icon.setAttribute('aria-hidden', 'true');
+
+        const type = document.createElement('span');
+        type.className = 'file-type';
+        type.textContent = fileMeta.label;
+
+        const name = document.createElement('div');
+        name.className = 'file-name';
+        name.textContent = file.name;
+
+        item.appendChild(icon);
+        item.appendChild(type);
+        item.appendChild(name);
+
+        if (currentBrowserType === 'folder' && file.isFolder) {
+            const actionWrap = document.createElement('div');
+            actionWrap.className = 'file-actions';
+
+            const selectBtn = document.createElement('button');
+            selectBtn.textContent = 'اختيار';
+            selectBtn.onclick = (event) => {
+                event.stopPropagation();
+                selectFile(file);
+            };
+
+            actionWrap.appendChild(selectBtn);
+            item.appendChild(actionWrap);
+        }
+
+        item.onclick = () => {
+            if (file.isFolder) {
+                folderHistory.push({ id: file.id, name: file.name });
+                navigateTo(file.id);
+                return;
+            }
+            selectFile(file);
+        };
+
+        fileList.appendChild(item);
+    });
+}
+
+function handleBrowserSearchInput() {
+    const input = document.getElementById('browserSearchInput');
+    currentBrowserQuery = input ? input.value : '';
+    renderBrowserFiles(currentBrowserFiles);
 }
 
 function fileTypeMeta(file) {
@@ -208,66 +471,12 @@ async function loadFiles(folderId) {
         const data = await res.json();
 
         loading.style.display = 'none';
-        fileList.innerHTML = '';
-
-        if (!data.files || data.files.length === 0) {
-            const empty = document.createElement('li');
-            empty.className = 'empty';
-            empty.textContent = 'لا توجد ملفات في هذا المسار';
-            fileList.appendChild(empty);
-            return;
-        }
-
-        data.files.forEach((file) => {
-            const item = document.createElement('li');
-            item.className = 'file-item' + (file.isFolder ? ' folder' : '');
-
-            const fileMeta = fileTypeMeta(file);
-
-            const icon = document.createElement('i');
-            icon.className = 'bi ' + fileMeta.icon + ' file-icon';
-            icon.setAttribute('aria-hidden', 'true');
-
-            const type = document.createElement('span');
-            type.className = 'file-type';
-            type.textContent = fileMeta.label;
-
-            const name = document.createElement('div');
-            name.className = 'file-name';
-            name.textContent = file.name;
-
-            item.appendChild(icon);
-            item.appendChild(type);
-            item.appendChild(name);
-
-            if (currentBrowserType === 'folder' && file.isFolder) {
-                const actionWrap = document.createElement('div');
-                actionWrap.className = 'file-actions';
-
-                const selectBtn = document.createElement('button');
-                selectBtn.textContent = 'اختيار';
-                selectBtn.onclick = (event) => {
-                    event.stopPropagation();
-                    selectFile(file);
-                };
-
-                actionWrap.appendChild(selectBtn);
-                item.appendChild(actionWrap);
-            }
-
-            item.onclick = () => {
-                if (file.isFolder) {
-                    folderHistory.push({ id: file.id, name: file.name });
-                    navigateTo(file.id);
-                    return;
-                }
-                selectFile(file);
-            };
-
-            fileList.appendChild(item);
-        });
+        currentBrowserFiles = Array.isArray(data.files) ? data.files : [];
+        renderBrowserFiles(currentBrowserFiles);
     } catch (error) {
         loading.style.display = 'none';
+        currentBrowserFiles = [];
+        updateBrowserSearchCount(0, 0);
         fileList.innerHTML = '<li class="error">فشل تحميل الملفات</li>';
     }
 }
@@ -421,8 +630,10 @@ function updateUI(data) {
 
     const status = normalizeStatus(data.status);
 
-    if (data.current_name) {
+    if (data.current_name && status === 'running') {
         document.getElementById('currentName').textContent = data.current_name;
+    } else if (status === 'stopped') {
+        document.getElementById('currentName').textContent = 'تم إيقاف العملية يدويا';
     } else if (status === 'idle' || status === 'completed') {
         document.getElementById('currentName').textContent = 'في انتظار بدء المعالجة';
     }
@@ -431,6 +642,7 @@ function updateUI(data) {
         idle: 'جاهز',
         running: 'قيد التشغيل',
         paused: 'متوقف مؤقتا',
+        stopped: 'تم الإيقاف',
         completed: 'مكتمل'
     };
 
@@ -439,7 +651,7 @@ function updateUI(data) {
     document.getElementById('statusText').textContent = labels[status] || 'جاهز';
 
     const isRunning = status === 'running' || status === 'paused';
-    const isStopped = status === 'idle' || status === 'completed';
+    const isStopped = status === 'idle' || status === 'completed' || status === 'stopped';
 
     document.getElementById('btnStart').disabled = isRunning;
     document.getElementById('btnStop').disabled = isStopped;
@@ -512,6 +724,18 @@ function applyConfigSaveResult(data) {
     }
 }
 
+async function finalizeConfigSaveSuccess(data, toastMessage) {
+    applyConfigSaveResult(data || {});
+
+    try {
+        await loadState();
+    } catch (_) {
+        // Ignore reload issues here; success already confirmed.
+    }
+
+    showToast(toastMessage || 'تم حفظ الإعدادات بنجاح', 'success');
+}
+
 function isSameSavedConfig(serverConfig, requestedConfig) {
     if (!serverConfig || !requestedConfig) {
         return false;
@@ -531,8 +755,14 @@ async function confirmConfigSaved(requestedConfig, timeoutMs = CONFIG_SAVE_CONFI
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() <= deadline) {
+        let pollTimeoutId = null;
+        const pollController = new AbortController();
         try {
-            const stateRes = await fetch('/api/state', { cache: 'no-store' });
+            pollTimeoutId = setTimeout(() => pollController.abort(), CONFIG_STATE_POLL_TIMEOUT_MS);
+            const stateRes = await fetch('/api/state', {
+                cache: 'no-store',
+                signal: pollController.signal
+            });
             if (stateRes.ok) {
                 const stateData = await parseJsonSafe(stateRes);
                 const serverConfig = stateData.config || {};
@@ -542,6 +772,10 @@ async function confirmConfigSaved(requestedConfig, timeoutMs = CONFIG_SAVE_CONFI
             }
         } catch (error) {
             // Ignore transient connectivity issues during confirmation polling.
+        } finally {
+            if (pollTimeoutId) {
+                clearTimeout(pollTimeoutId);
+            }
         }
 
         await waitMs(CONFIG_SAVE_CONFIRM_INTERVAL_MS);
@@ -631,18 +865,36 @@ async function saveConfig() {
         const fetchOutcomePromise = requestConfigSave(config, controller);
         const earlyConfirmPromise = confirmConfigSaved(config, CONFIG_SAVE_EARLY_CONFIRM_TIMEOUT_MS)
             .then((result) => ({ kind: 'confirm', result }));
+        const logOutcomePromise = new Promise((resolve) => {
+            pendingSaveLogResolver = resolve;
+        });
 
-        let firstOutcome = await Promise.race([fetchOutcomePromise, earlyConfirmPromise]);
+        let firstOutcome = await Promise.race([fetchOutcomePromise, earlyConfirmPromise, logOutcomePromise]);
+
+        if (firstOutcome.kind === 'log_saved') {
+            const confirmed = await confirmConfigSaved(config, 15000);
+            if (confirmed.saved) {
+                if (!controller.signal.aborted) {
+                    controller.abort();
+                }
+                await finalizeConfigSaveSuccess({
+                    config: confirmed.stateData?.config || {},
+                    columns: confirmed.stateData?.columns || []
+                }, 'تم حفظ الإعدادات بنجاح على الخادم');
+                return;
+            }
+
+            firstOutcome = await fetchOutcomePromise;
+        }
 
         if (firstOutcome.kind === 'confirm' && firstOutcome.result.saved) {
             if (!controller.signal.aborted) {
                 controller.abort();
             }
-            applyConfigSaveResult({
+            await finalizeConfigSaveSuccess({
                 config: firstOutcome.result.stateData?.config || {},
                 columns: firstOutcome.result.stateData?.columns || []
-            });
-            showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+            }, 'تم حفظ الإعدادات بنجاح على الخادم');
             return;
         }
 
@@ -652,14 +904,12 @@ async function saveConfig() {
 
         if (firstOutcome.kind === 'fetch_error') {
             if (firstOutcome.error && firstOutcome.error.name === 'AbortError') {
-                showToast('تأخر رد الخادم. جار التحقق من حالة الحفظ...', 'warning');
                 const confirmed = await confirmConfigSaved(config);
                 if (confirmed.saved) {
-                    applyConfigSaveResult({
+                    await finalizeConfigSaveSuccess({
                         config: confirmed.stateData?.config || {},
                         columns: confirmed.stateData?.columns || []
-                    });
-                    showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+                    }, 'تم حفظ الإعدادات بنجاح على الخادم');
                     return;
                 }
                 showToast('تعذر تأكيد الحفظ بعد انتهاء المهلة. حاول مرة أخرى.', 'error');
@@ -673,23 +923,21 @@ async function saveConfig() {
         if (!firstOutcome.ok) {
             const confirmed = await confirmConfigSaved(config, 20000);
             if (confirmed.saved) {
-                applyConfigSaveResult({
+                await finalizeConfigSaveSuccess({
                     config: confirmed.stateData?.config || {},
                     columns: confirmed.stateData?.columns || []
-                });
-                showToast('تم حفظ الإعدادات بنجاح على الخادم', 'success');
+                }, 'تم حفظ الإعدادات بنجاح على الخادم');
                 return;
             }
             showToast(data.error || 'تعذر حفظ الإعدادات', 'error');
             return;
         }
 
-        applyConfigSaveResult(data);
-
-        showToast('تم حفظ الإعدادات بنجاح', 'success');
+        await finalizeConfigSaveSuccess(data, 'تم حفظ الإعدادات بنجاح');
     } catch (error) {
         showToast('تعذر الاتصال بالخادم', 'error');
     } finally {
+        pendingSaveLogResolver = null;
         if (slowNoticeId) {
             clearTimeout(slowNoticeId);
         }
@@ -728,25 +976,49 @@ async function startGeneration() {
 }
 
 async function stopGeneration() {
-    const shouldStop = confirm('هل تريد إيقاف عملية الإصدار الحالية؟');
-    if (!shouldStop) {
+    const statusText = document.getElementById('statusText').textContent || '';
+    if (statusText !== 'قيد التشغيل' && statusText !== 'متوقف مؤقتا') {
+        showToast('لا توجد عملية قيد التشغيل لإيقافها', 'info');
         return;
     }
 
-    try {
-        await fetch('/api/stop', { method: 'POST' });
+    openStopConfirmModal();
+}
 
-        document.getElementById('totalCount').textContent = '0';
-        document.getElementById('completedCount').textContent = '0';
-        document.getElementById('failedCount').textContent = '0';
-        document.getElementById('rateCount').textContent = '0';
-        document.getElementById('progressBar').style.width = '0%';
-        document.getElementById('progressBar').textContent = '0%';
-        document.getElementById('currentName').textContent = 'في انتظار بدء المعالجة';
+async function confirmStopGeneration() {
+    if (isStoppingGeneration) {
+        return;
+    }
+
+    isStoppingGeneration = true;
+    const confirmButton = document.getElementById('confirmStopBtn');
+    const originalText = confirmButton ? confirmButton.textContent : '';
+
+    if (confirmButton) {
+        confirmButton.disabled = true;
+        confirmButton.textContent = 'جاري الإيقاف...';
+    }
+
+    closeStopConfirmModal();
+
+    try {
+        const res = await fetch('/api/stop', { method: 'POST' });
+        if (!res.ok) {
+            showToast('تعذر إيقاف العملية', 'error');
+            return;
+        }
+
+        await loadState();
 
         showToast('تم إيقاف العملية', 'warning');
     } catch (error) {
         showToast('تعذر الاتصال بالخادم', 'error');
+    } finally {
+        isStoppingGeneration = false;
+        if (confirmButton) {
+            confirmButton.disabled = false;
+            confirmButton.textContent = originalText || 'نعم، إيقاف الآن';
+        }
     }
 }
 

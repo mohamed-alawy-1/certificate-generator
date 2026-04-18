@@ -350,6 +350,16 @@ Madam</textarea>
                 <button class="modal-close" onclick="closeBrowser()">×</button>
             </div>
             <div class="modal-body">
+                <div class="browser-search">
+                    <i class="bi bi-search" aria-hidden="true"></i>
+                    <input
+                        id="browserSearchInput"
+                        type="text"
+                        placeholder="ابحث بالاسم... المطابقة مرنة ولا تحتاج كتابة حرفية"
+                        oninput="handleBrowserSearchInput()"
+                    >
+                </div>
+                <div class="browser-search-count" id="browserSearchCount"></div>
                 <div class="breadcrumb" id="breadcrumb"></div>
                 <div id="loadingFiles" class="loading">جاري التحميل...</div>
                 <ul class="file-list" id="fileList"></ul>
@@ -357,8 +367,24 @@ Madam</textarea>
         </div>
     </div>
 
+    <div class="modal confirm-modal" id="stopConfirmModal" aria-hidden="true">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>تأكيد إيقاف العملية</h3>
+                <button class="modal-close" onclick="closeStopConfirmModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-text">هل تريد إيقاف عملية الإصدار الحالية؟ سيتم حفظ التقدم المنجز حتى الآن.</p>
+                <div class="modal-actions">
+                    <button class="btn btn-neutral" onclick="closeStopConfirmModal()">إلغاء</button>
+                    <button class="btn btn-danger" id="confirmStopBtn" onclick="confirmStopGeneration()">نعم، إيقاف الآن</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="toast-stack" id="toastStack"></div>
 
-    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=20260418-4"></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=20260418-9"></script>
 </body>
 </html>

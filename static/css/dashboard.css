@@ -260,6 +260,12 @@ body {
     border-color: color-mix(in srgb, var(--primary) 32%, transparent);
 }
 
+.status-stopped {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
 .status-running .dot {
     animation: pulse 1.2s infinite;
 }
@@ -635,6 +641,61 @@ textarea {
 .modal-body {
     padding: 14px;
     overflow-y: auto;
+}
+
+.browser-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-soft);
+    padding: 8px 12px;
+    margin-bottom: 8px;
+}
+
+.browser-search i {
+    color: var(--muted);
+    font-size: 0.95rem;
+}
+
+.browser-search input {
+    border: none;
+    background: transparent;
+    padding: 0;
+    width: 100%;
+    color: var(--text);
+    font-size: 0.9rem;
+}
+
+.browser-search input:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+.browser-search-count {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-bottom: 10px;
+    min-height: 1.1rem;
+}
+
+.confirm-modal .modal-content {
+    width: min(520px, 100%);
+}
+
+.confirm-text {
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 0.95rem;
+    margin-bottom: 14px;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
 }
 
 .breadcrumb {

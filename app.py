@@ -14,6 +14,7 @@ import re
 import json
 import os
 import glob
+import logging
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -23,9 +24,22 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'certificate-generator-secret'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
+# Persistent file logger so app-level logs are visible in app.log as well.
+APP_LOG_PATH = os.environ.get('APP_LOG_PATH', 'app.log')
+app_logger = logging.getLogger('certificate_dashboard')
+if not app_logger.handlers:
+    file_handler = logging.FileHandler(APP_LOG_PATH, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter(
+        '[%(asctime)s] [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    app_logger.addHandler(file_handler)
+app_logger.setLevel(logging.INFO)
+app_logger.propagate = False
+
 # ============ STATE ============
 state = {
-    'status': 'idle',  # idle, running, paused, completed
+    'status': 'idle',  # idle, running, paused, stopped, completed
     'total': 0,
     'completed': 0,
     'failed': 0,
@@ -304,6 +318,18 @@ def add_log(message, level='info'):
     
     try:
         socketio.emit('log', log_entry, namespace='/')
+    except:
+        pass
+
+    # Mirror dashboard logs to app.log for server-side troubleshooting.
+    try:
+        text = f'{timestamp} {message}'
+        if level == 'error':
+            app_logger.error(text)
+        elif level == 'warning':
+            app_logger.warning(text)
+        else:
+            app_logger.info(text)
     except:
         pass
 
@@ -869,6 +895,12 @@ def run_generator(todo=None, is_retry=False):
         
         for t in threads:
             t.join()
+
+        if stop_flag.is_set():
+            state['status'] = 'stopped'
+            add_log('⏹️ Generation stopped by user', 'warning')
+            broadcast_state()
+            return
         
         elapsed = time.time() - state['start_time']
         rate = state['completed'] / (elapsed / 60) if elapsed > 0 else 0
@@ -995,6 +1027,17 @@ def get_sheet_columns(sheet_id):
 
 def detect_single_variable_in_background(template_id, template_type, name_col):
     """Detect first template variable asynchronously to keep /api/config fast."""
+    # If name column is not ready yet, wait briefly for sheet metadata thread.
+    wait_started = time.time()
+    while (not name_col or str(name_col).strip().upper() == 'A') and (time.time() - wait_started) < 8:
+        time.sleep(0.5)
+        with state_lock:
+            if state['config'].get('template_doc_id') != template_id:
+                return
+            latest_name_col = state['config'].get('name_column', '')
+        if latest_name_col:
+            name_col = latest_name_col
+
     detected = detect_template_variables(template_id, template_type)
     if not detected:
         return
@@ -1014,6 +1057,30 @@ def detect_single_variable_in_background(template_id, template_type, name_col):
 
     add_log(f'🔍 Detected variable: {first_var} → Column {name_col or "A"}', 'info')
     broadcast_state()
+
+def refresh_sheet_metadata_in_background(sheet_id):
+    """Load sheet columns and link/name columns asynchronously."""
+    started_at = time.time()
+    try:
+        add_log('⏳ Background: loading sheet metadata...', 'info')
+        columns = get_sheet_columns(sheet_id)
+        link_column = find_or_create_link_column(sheet_id, columns)
+        name_column = auto_detect_name_column(columns)
+
+        with state_lock:
+            # Ignore stale results if user changed sheet while task was running.
+            if state['config'].get('sheet_id') != sheet_id:
+                return
+            state['columns'] = columns
+            state['config']['link_column'] = link_column or state['config'].get('link_column', 'O') or 'O'
+            state['config']['name_column'] = name_column or state['config'].get('name_column', '')
+
+        elapsed = time.time() - started_at
+        add_log(f'✅ Background: sheet metadata ready in {elapsed:.2f}s', 'success')
+        broadcast_state()
+    except Exception as e:
+        add_log(f'⚠️ Background: sheet metadata failed: {str(e)[:100]}', 'warning')
+        broadcast_state()
 
 def auto_detect_name_column(columns):
     """Auto-detect column with name based on header"""
@@ -1212,14 +1279,16 @@ def save_config():
 
     sheet_changed = state['config']['sheet_id'] != prev_sheet_id
     
-    # Load columns if sheet changed
+    # Load sheet metadata in background to keep config save responsive.
     if state['config']['sheet_id']:
         if sheet_changed or not state.get('columns'):
-            state['columns'] = get_sheet_columns(state['config']['sheet_id'])
-            # Auto-detect or create link column
-            state['config']['link_column'] = find_or_create_link_column(state['config']['sheet_id'], state['columns'])
-            # Auto-detect name column
-            state['config']['name_column'] = auto_detect_name_column(state['columns'])
+            state['columns'] = []
+            add_log('⏳ Scheduling sheet metadata refresh in background...', 'info')
+            threading.Thread(
+                target=refresh_sheet_metadata_in_background,
+                args=(state['config']['sheet_id'],),
+                daemon=True
+            ).start()
     else:
         state['columns'] = []
         state['config']['link_column'] = 'O'
@@ -1389,7 +1458,7 @@ def pause_generation():
 def stop_generation():
     stop_flag.set()
     pause_flag.clear()
-    state['status'] = 'idle'
+    state['status'] = 'stopped'
     add_log('⏹️ Stopped', 'warning')
     broadcast_state()
     return jsonify({'success': True})
