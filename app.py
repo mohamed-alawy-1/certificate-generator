@@ -6,8 +6,11 @@ Certificate Generator Dashboard v2
 - Multiple variables support
 """
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
+from werkzeug.security import check_password_hash, generate_password_hash
+from datetime import timedelta
+from hmac import compare_digest
 import threading
 import time
 import re
@@ -15,13 +18,29 @@ import json
 import os
 import glob
 import logging
+import secrets
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'certificate-generator-secret'
+app.config['SECRET_KEY'] = (
+    os.environ.get('APP_SECRET_KEY')
+    or os.environ.get('FLASK_SECRET_KEY')
+    or os.environ.get('SECRET_KEY')
+    or secrets.token_hex(32)
+)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '1') == '1'
+try:
+    session_timeout_minutes = max(30, int(os.environ.get('SESSION_TIMEOUT_MINUTES', '480')))
+except (TypeError, ValueError):
+    session_timeout_minutes = 480
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(
+    minutes=session_timeout_minutes
+)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Persistent file logger so app-level logs are visible in app.log as well.
@@ -305,6 +324,156 @@ def normalize_name_for_comparison(name):
 
 # Lock for thread-safe state updates
 state_lock = threading.Lock()
+
+# Lock and runtime state for admin authentication.
+auth_lock = threading.Lock()
+
+
+def _safe_env_int(name, default, minimum):
+    """Read integer from env and clamp to a secure minimum."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+auth_state = {
+    'username': (os.environ.get('ADMIN_USERNAME', 'admin') or 'admin').strip() or 'admin',
+    'password_hash': (os.environ.get('ADMIN_PASSWORD_HASH', '') or '').strip(),
+    'configured': False,
+    'max_attempts': _safe_env_int('LOGIN_MAX_ATTEMPTS', 5, 3),
+    'window_seconds': _safe_env_int('LOGIN_WINDOW_SECONDS', 900, 60),
+    'lockout_seconds': _safe_env_int('LOGIN_LOCKOUT_SECONDS', 900, 60),
+    'single_session_only': os.environ.get('ENFORCE_SINGLE_ADMIN_SESSION', '0') == '1',
+    'attempt_buckets': {},
+    'active_sessions': set(),
+}
+
+_plain_admin_password = (os.environ.get('ADMIN_PASSWORD', '') or '').strip()
+if auth_state['password_hash']:
+    auth_state['configured'] = True
+elif _plain_admin_password:
+    auth_state['password_hash'] = generate_password_hash(_plain_admin_password)
+    auth_state['configured'] = True
+    app_logger.warning('ADMIN_PASSWORD is set as plaintext env. Prefer ADMIN_PASSWORD_HASH.')
+else:
+    app_logger.warning('Admin login is not configured. Set ADMIN_PASSWORD_HASH to enable login.')
+
+if auth_state['single_session_only']:
+    app_logger.info('Admin auth mode: single active session only.')
+else:
+    app_logger.info('Admin auth mode: concurrent sessions allowed for the same account.')
+
+
+def _client_ip():
+    """Get real client IP when running behind Nginx reverse proxy."""
+    forwarded_for = (request.headers.get('X-Forwarded-For', '') or '').strip()
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+
+def _bucket_key_for_ip(ip):
+    return f'ip:{ip}'
+
+
+def _get_bucket(bucket_key, now_ts):
+    bucket = auth_state['attempt_buckets'].get(bucket_key)
+    if not bucket:
+        bucket = {'count': 0, 'window_start': now_ts, 'locked_until': 0.0}
+        auth_state['attempt_buckets'][bucket_key] = bucket
+        return bucket
+
+    if now_ts - bucket['window_start'] > auth_state['window_seconds']:
+        bucket['count'] = 0
+        bucket['window_start'] = now_ts
+
+    return bucket
+
+
+def _bucket_locked_seconds(bucket, now_ts):
+    locked_until = bucket.get('locked_until', 0.0)
+    if locked_until <= now_ts:
+        return 0
+    return int((locked_until - now_ts) + 0.999)
+
+
+def _get_login_lock_seconds(ip):
+    now_ts = time.time()
+    with auth_lock:
+        ip_bucket = _get_bucket(_bucket_key_for_ip(ip), now_ts)
+        global_bucket = _get_bucket('global', now_ts)
+        return max(
+            _bucket_locked_seconds(ip_bucket, now_ts),
+            _bucket_locked_seconds(global_bucket, now_ts)
+        )
+
+
+def _record_failed_login(ip):
+    now_ts = time.time()
+    with auth_lock:
+        for bucket_key in (_bucket_key_for_ip(ip), 'global'):
+            bucket = _get_bucket(bucket_key, now_ts)
+            bucket['count'] += 1
+            if bucket['count'] >= auth_state['max_attempts']:
+                bucket['count'] = 0
+                bucket['window_start'] = now_ts
+                bucket['locked_until'] = now_ts + auth_state['lockout_seconds']
+
+
+def _clear_login_attempts(ip):
+    with auth_lock:
+        auth_state['attempt_buckets'].pop(_bucket_key_for_ip(ip), None)
+        auth_state['attempt_buckets'].pop('global', None)
+
+
+def _is_authenticated_session():
+    username = (session.get('username') or '').strip()
+    session_id = (session.get('session_id') or '').strip()
+    if not username or not session_id:
+        return False
+    if not compare_digest(username, auth_state['username']):
+        return False
+
+    with auth_lock:
+        active_sessions = auth_state.get('active_sessions', set())
+
+    return session_id in active_sessions
+
+
+def _get_or_create_csrf_token():
+    token = (session.get('csrf_token') or '').strip()
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    session['csrf_token'] = token
+    return token
+
+
+def _validate_csrf_token(token):
+    expected = (session.get('csrf_token') or '').strip()
+    provided = (token or '').strip()
+    return bool(expected and provided and compare_digest(expected, provided))
+
+
+def _sanitize_next_url(next_url):
+    candidate = (next_url or '').strip()
+    if not candidate or not candidate.startswith('/'):
+        return ''
+    if candidate.startswith('//'):
+        return ''
+    return candidate
+
+
+def _unauthorized_response():
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    next_url = _sanitize_next_url(request.path)
+    if next_url:
+        return redirect(url_for('login', next=next_url))
+    return redirect(url_for('login'))
 
 def add_log(message, level='info'):
     """Add log message and broadcast"""
@@ -1152,9 +1321,131 @@ def find_or_create_link_column(sheet_id, columns=None):
 
 # ============ ROUTES ============
 
+
+@app.before_request
+def enforce_authentication():
+    endpoint = request.endpoint or ''
+
+    # Login page and static assets must remain public.
+    if endpoint in ('login', 'static'):
+        return None
+
+    # Socket.IO performs its own authentication check in connect handler.
+    if request.path.startswith('/socket.io'):
+        return None
+
+    # Fail closed when admin credentials are not configured yet.
+    if not auth_state['configured']:
+        return redirect(url_for('login'))
+
+    if not _is_authenticated_session():
+        session.clear()
+        return _unauthorized_response()
+
+    session.permanent = True
+    return None
+
+
+@app.after_request
+def add_response_security_headers(response):
+    if request.endpoint in ('login', 'logout'):
+        response.headers['Cache-Control'] = 'no-store'
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    return response
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if auth_state['configured'] and _is_authenticated_session():
+        return redirect(url_for('index'))
+
+    error_message = ''
+    lock_seconds = 0
+    next_url = _sanitize_next_url(request.values.get('next', '')) or url_for('index')
+    username_value = auth_state['username']
+
+    if request.method == 'POST':
+        username_value = (request.form.get('username', '') or '').strip()
+        client_ip = _client_ip()
+        lock_seconds = _get_login_lock_seconds(client_ip)
+
+        if lock_seconds > 0:
+            error_message = f'تم قفل تسجيل الدخول مؤقتًا. حاول بعد {lock_seconds} ثانية.'
+        elif not auth_state['configured']:
+            error_message = 'الحساب غير مُهيأ بعد. عيّن ADMIN_PASSWORD_HASH ثم أعد تشغيل الخدمة.'
+        elif not _validate_csrf_token(request.form.get('csrf_token', '')):
+            error_message = 'انتهت صلاحية جلسة تسجيل الدخول. أعد المحاولة.'
+        else:
+            password = request.form.get('password', '') or ''
+            username_ok = compare_digest(username_value, auth_state['username'])
+            password_ok = False
+            if username_ok:
+                try:
+                    password_ok = check_password_hash(auth_state['password_hash'], password)
+                except Exception:
+                    password_ok = False
+
+            if username_ok and password_ok:
+                session_id = secrets.token_urlsafe(32)
+                with auth_lock:
+                    if auth_state['single_session_only']:
+                        auth_state['active_sessions'] = {session_id}
+                    else:
+                        auth_state['active_sessions'].add(session_id)
+
+                _clear_login_attempts(client_ip)
+                session.clear()
+                session.permanent = True
+                session['username'] = auth_state['username']
+                session['session_id'] = session_id
+                session['csrf_token'] = secrets.token_urlsafe(32)
+                add_log('🔐 Admin logged in', 'info')
+                return redirect(next_url)
+
+            _record_failed_login(client_ip)
+            time.sleep(0.35)
+            lock_seconds = _get_login_lock_seconds(client_ip)
+            if lock_seconds > 0:
+                error_message = f'محاولات كثيرة. تم القفل لمدة {lock_seconds} ثانية.'
+            else:
+                error_message = 'اسم المستخدم أو كلمة المرور غير صحيحة.'
+            app_logger.warning('Failed admin login attempt from %s', client_ip)
+
+    csrf_token = _get_or_create_csrf_token()
+    return render_template(
+        'login.html',
+        csrf_token=csrf_token,
+        next_url=next_url,
+        error_message=error_message,
+        lock_seconds=lock_seconds,
+        auth_configured=auth_state['configured'],
+        single_session_only=auth_state['single_session_only'],
+        username_value=username_value,
+    )
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    if not _validate_csrf_token(request.form.get('csrf_token', '')):
+        return redirect(url_for('index'))
+
+    current_session_id = (session.get('session_id') or '').strip()
+    with auth_lock:
+        if current_session_id:
+            auth_state['active_sessions'].discard(current_session_id)
+
+    session.clear()
+    add_log('🔓 Admin logged out', 'info')
+    return redirect(url_for('login'))
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template(
+        'index.html',
+        csrf_token=_get_or_create_csrf_token(),
+        admin_username=auth_state['username']
+    )
 
 @app.route('/api/drive/list')
 def api_drive_list():
@@ -1449,6 +1740,9 @@ def reload_accounts():
 
 @socketio.on('connect')
 def handle_connect():
+    if not auth_state['configured'] or not _is_authenticated_session():
+        return False
+
     emit('state_update', {
         'status': state['status'],
         'total': state['total'],

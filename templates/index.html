@@ -20,10 +20,21 @@
                     <p>واجهة احترافية لإدارة الإعدادات ومتابعة التشغيل المباشر</p>
                 </div>
                 <div class="top-actions">
+                    <span class="admin-chip" title="الحساب النشط">
+                        <i class="bi bi-person-check" aria-hidden="true"></i>
+                        <span>{{ admin_username }}</span>
+                    </span>
                     <button class="btn btn-neutral" onclick="reloadAccounts()">
                         <i class="bi bi-arrow-repeat" aria-hidden="true"></i>
                         <span>تحديث حسابات الخدمة</span>
                     </button>
+                    <form class="inline-form" method="post" action="{{ url_for('logout') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button class="btn btn-neutral" type="submit">
+                            <i class="bi bi-box-arrow-left" aria-hidden="true"></i>
+                            <span>تسجيل الخروج</span>
+                        </button>
+                    </form>
                 </div>
             </header>
 

@@ -118,6 +118,100 @@ sudo systemctl start certificate-dashboard     # Start
 sudo journalctl -u certificate-dashboard -f    # View logs
 ```
 
+#### 3.5 Enable Secure Admin Login (Recommended)
+
+The dashboard now supports a single admin account with:
+- Session-based authentication
+- Brute-force lockout (temporary lock after repeated failed attempts)
+- Concurrent sessions by default (same account can login from multiple devices)
+- Optional single-session mode via `ENFORCE_SINGLE_ADMIN_SESSION=1`
+
+Generate a password hash:
+```bash
+python3 -c "from werkzeug.security import generate_password_hash; import getpass; print(generate_password_hash(getpass.getpass('Admin password: ')))"
+```
+
+Add environment variables to the systemd service:
+```bash
+sudo systemctl edit certificate-dashboard
+```
+
+Then add:
+```ini
+[Service]
+Environment="ADMIN_USERNAME=admin"
+Environment="ADMIN_PASSWORD_HASH=PASTE_HASH_HERE"
+Environment="APP_SECRET_KEY=CHANGE_TO_A_LONG_RANDOM_SECRET"
+Environment="SESSION_COOKIE_SECURE=1"
+Environment="LOGIN_MAX_ATTEMPTS=5"
+Environment="LOGIN_WINDOW_SECONDS=900"
+Environment="LOGIN_LOCKOUT_SECONDS=900"
+Environment="ENFORCE_SINGLE_ADMIN_SESSION=0"
+```
+
+Apply and restart:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart certificate-dashboard
+```
+
+##### Where These Variables Live
+
+This deployment uses **systemd environment variables** (not `.env` by default).
+
+- Main unit file: `/etc/systemd/system/certificate-dashboard.service`
+- Auth drop-in file: `/etc/systemd/system/certificate-dashboard.service.d/auth.conf`
+
+View active config:
+```bash
+sudo systemctl cat certificate-dashboard
+```
+
+##### Change Admin Password Safely
+
+Use this flow to replace `ADMIN_PASSWORD_HASH` without storing plaintext password in files:
+
+```bash
+cd /root/certificate-dashboard
+
+read -s -p "New admin password: " NEW_PASS; echo
+NEW_HASH=$(ADMIN_PASSWORD="$NEW_PASS" ./venv/bin/python -c "from werkzeug.security import generate_password_hash; import os; print(generate_password_hash(os.environ['ADMIN_PASSWORD']))")
+unset NEW_PASS
+
+sudo sed -i "s|^Environment=\"ADMIN_PASSWORD_HASH=.*\"|Environment=\"ADMIN_PASSWORD_HASH=$NEW_HASH\"|" /etc/systemd/system/certificate-dashboard.service.d/auth.conf
+
+sudo systemctl daemon-reload
+sudo systemctl restart certificate-dashboard
+sudo systemctl is-active certificate-dashboard
+```
+
+##### Change Admin Username
+
+```bash
+sudo sed -i 's/^Environment="ADMIN_USERNAME=.*/Environment="ADMIN_USERNAME=admin"/' /etc/systemd/system/certificate-dashboard.service.d/auth.conf
+sudo systemctl daemon-reload
+sudo systemctl restart certificate-dashboard
+```
+
+##### Session Mode (One Device vs Multiple Devices)
+
+- Allow login from multiple devices with same account (default):
+   `Environment="ENFORCE_SINGLE_ADMIN_SESSION=0"`
+- Force one active session only:
+   `Environment="ENFORCE_SINGLE_ADMIN_SESSION=1"`
+
+After changing either value:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart certificate-dashboard
+```
+
+##### Quick Verification
+
+```bash
+sudo grep -E 'ADMIN_USERNAME|ADMIN_PASSWORD_HASH|ENFORCE_SINGLE_ADMIN_SESSION|LOGIN_' /etc/systemd/system/certificate-dashboard.service.d/auth.conf
+```
+
 #### 4. Setup Nginx Reverse Proxy (Security)
 ```bash
 ./scripts/ops/setup-nginx.sh

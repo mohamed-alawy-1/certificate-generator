@@ -17,6 +17,16 @@ const CONFIG_SAVE_CONFIRM_TIMEOUT_MS = 120000;
 const CONFIG_SAVE_CONFIRM_INTERVAL_MS = 3000;
 const CONFIG_STATE_POLL_TIMEOUT_MS = 4000;
 
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+    const response = await nativeFetch(...args);
+    if (response.status === 401) {
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
+    }
+    return response;
+};
+
 document.addEventListener('DOMContentLoaded', () => {
     bindModalShortcuts();
     loadState();
