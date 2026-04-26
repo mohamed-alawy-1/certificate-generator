@@ -463,6 +463,15 @@ def _sanitize_next_url(next_url):
         return ''
     if candidate.startswith('//'):
         return ''
+
+    # Allow redirect targets only for normal page navigation.
+    blocked_exact = {'/logout', '/login'}
+    blocked_prefixes = ('/api/', '/socket.io', '/static/')
+    if candidate in blocked_exact:
+        return ''
+    if any(candidate.startswith(prefix) for prefix in blocked_prefixes):
+        return ''
+
     return candidate
 
 
