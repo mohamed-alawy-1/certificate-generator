@@ -30,7 +30,12 @@ git pull --ff-only origin "$BRANCH"
 
 chmod +x scripts/ops/*.sh
 
-echo "==> Applying service setup and restart..."
-APP_DIR="$APP_DIR" ./scripts/ops/setup-systemd.sh
+echo "==> Rebuilding and restarting Docker container..."
+docker compose build app
+docker compose up -d --force-recreate app
+
+echo "==> Waiting for container to start..."
+sleep 8
+docker compose ps
 
 echo "==> Deploy completed"
