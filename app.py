@@ -9,6 +9,7 @@ Certificate Generator Dashboard v2
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from datetime import timedelta
 from hmac import compare_digest
 import threading
@@ -25,6 +26,7 @@ from googleapiclient.http import MediaIoBaseUpload
 import io
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config['SECRET_KEY'] = (
     os.environ.get('APP_SECRET_KEY')
     or os.environ.get('FLASK_SECRET_KEY')
